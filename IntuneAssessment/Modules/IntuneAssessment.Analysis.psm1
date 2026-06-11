@@ -189,11 +189,9 @@ function Get-IARecommendations {
     }
 
     # --- Segurança ------------------------------------------------------------------
-    foreach ($m in @($Data.Security.MissingCategories)) {
-        Add-Rec 'Alto' 'Segurança' "Nenhuma política de '$m' encontrada no ambiente." `
-            'Lacunas em categorias essenciais de Endpoint Security aumentam a superfície de ataque.' `
-            "Criar e atribuir políticas de $m via Endpoint Security ou Security Baseline."
-    }
+    # (Não geramos recomendações prescritivas do tipo "categoria X ausente" - apenas
+    #  achados derivados de dados reais do relatório. A ausência de categorias continua
+    #  visível como informação no Módulo 11, sem virar recomendação.)
     $su = @($Data.Security.Unassigned).Count
     if ($su -gt 0) {
         Add-Rec 'Médio' 'Segurança' "$su políticas de segurança sem atribuição." `

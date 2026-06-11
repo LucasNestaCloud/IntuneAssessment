@@ -357,6 +357,66 @@ function Get-IAConfigurationProfiles {
 }
 
 # ===================================================== MÓDULO 6: APLICATIVOS
+function Get-IAAppInstallSummaryReport {
+    <#
+      Status de instalação de TODOS os apps em uma única fonte: a API de relatórios
+      do Intune (getAppsInstallSummaryReport) - a MESMA que o portal usa na tela
+      "Status de instalação do app". Funciona via POST e por tenant inteiro,
+      contornando o installSummary por app (que o Graph recusa com 400 em vários
+      tipos). Retorna um hashtable indexado por ApplicationId.
+    #>
+    param([string]$ReportUri = "$GraphBeta/deviceManagement/reports/getAppsInstallSummaryReport")
+    $map = @{}
+    $skip = 0; $top = 50; $guard = 0
+    try {
+        while ($true) {
+            $guard++; if ($guard -gt 200) { break }   # trava de segurança
+            $body = @{ skip = $skip; top = $top }
+            $resp = Invoke-IAGraphRequest -Uri $ReportUri -Method POST -Body $body -SuppressNotFound
+            if (-not $resp) { break }
+
+            # Schema = definição de colunas (ordem); Values = linhas (arrays na mesma ordem)
+            $schema = @($resp.Schema)
+            $values = @($resp.Values)
+            if ($schema.Count -eq 0 -or $values.Count -eq 0) { break }
+
+            # Índice das colunas por nome (tolerante a variações entre versões da API)
+            $col = @{}
+            for ($i = 0; $i -lt $schema.Count; $i++) {
+                $name = if ($schema[$i].Column) { [string]$schema[$i].Column } else { [string]$schema[$i].column }
+                if ($name) { $col[$name] = $i }
+            }
+            $get = {
+                param($row, [string[]]$names)
+                foreach ($n in $names) { if ($col.ContainsKey($n)) { $v = $row[$col[$n]]; if ($null -ne $v -and $v -ne '') { return [int]$v } } }
+                return 0
+            }
+            $idCol = @('ApplicationId', 'AppId') | Where-Object { $col.ContainsKey($_) } | Select-Object -First 1
+
+            foreach ($row in $values) {
+                $appId = if ($idCol) { [string]$row[$col[$idCol]] } else { $null }
+                if (-not $appId) { continue }
+                $map[$appId] = [PSCustomObject]@{
+                    Installed     = (& $get $row @('InstalledDeviceCount'))      + (& $get $row @('InstalledUserCount'))
+                    Failed        = (& $get $row @('FailedDeviceCount'))         + (& $get $row @('FailedUserCount'))
+                    Pending       = (& $get $row @('PendingInstallDeviceCount')) + (& $get $row @('PendingInstallUserCount'))
+                    NotInstalled  = (& $get $row @('NotInstalledDeviceCount'))   + (& $get $row @('NotInstalledUserCount'))
+                    NotApplicable = (& $get $row @('NotApplicableDeviceCount'))  + (& $get $row @('NotApplicableUserCount'))
+                }
+            }
+
+            $total = [int]$resp.TotalRowCount
+            $skip += $top
+            if ($values.Count -lt $top -or ($total -gt 0 -and $skip -ge $total)) { break }
+        }
+        if ($map.Count) { Write-IALog "Status de instalacao obtido via relatorio do Intune (getAppsInstallSummaryReport): $($map.Count) apps." -Level INFO }
+    }
+    catch {
+        Write-IALog "Relatorio getAppsInstallSummaryReport indisponivel ($($_.Exception.Message)). Usando installSummary por app como alternativa." -Level WARN
+    }
+    return $map
+}
+
 function Get-IAApplications {
     param([switch]$SkipInstallStatus)   # acelera tenants com centenas de apps
     Write-IALog "[Módulo 6] Coletando inventário de aplicativos..." -Level INFO
@@ -365,6 +425,9 @@ function Get-IAApplications {
     if (-not $raw -or @($raw).Count -eq 0) {
         Write-IALog "Graph retornou 0 aplicativos em deviceAppManagement/mobileApps. Se o tenant possui apps, verifique a permissão DeviceManagementApps.Read.All e a role Intune da conta." -Level WARN
     }
+
+    # Fonte primária do status de instalação: relatório do Intune (1 chamada p/ todos).
+    $installReport = if ($SkipInstallStatus) { @{} } else { Get-IAAppInstallSummaryReport }
 
     $typeMap = @{
         'win32LobApp'='Win32'; 'winGetApp'='Microsoft Store (novo)'; 'microsoftStoreForBusinessApp'='Microsoft Store (legado)'
@@ -385,18 +448,23 @@ function Get-IAApplications {
         $cat    = if ($typeMap.ContainsKey($odType)) { $typeMap[$odType] } else { $odType }
         $asg    = ConvertTo-IAAssignmentSummary @($a.assignments)
 
-        # Status de instalação (installSummary por app). Distingue "sem falhas"
-        # de "status indisponível": alguns tipos de app retornam 400 no beta;
-        # nesse caso tentamos a v1.0 e, se ainda assim falhar, marcamos como
-        # INDISPONÍVEL (não como zero) - assim um app com erro no portal nunca
-        # aparece como "sem erro" só porque o endpoint não pôde ser lido.
+        # Status de instalação: primeiro o relatório do Intune (fonte do portal);
+        # se o app não estiver no relatório, tenta installSummary (beta -> v1.0);
+        # se nada retornar, marca INDISPONÍVEL (não zero), para nunca exibir um
+        # app com erro como "sem erro".
+        $rep  = $installReport[$a.id]
         $inst = $null
-        if (-not $SkipInstallStatus) {
+        if (-not $rep -and -not $SkipInstallStatus) {
             $inst = Invoke-IAGraphRequest -Uri "$GraphBeta/deviceAppManagement/mobileApps/$($a.id)/installSummary" -SuppressNotFound
             if (-not $inst) { $inst = Invoke-IAGraphRequest -Uri "$GraphV1/deviceAppManagement/mobileApps/$($a.id)/installSummary" -SuppressNotFound }
         }
-        $statusOK = [bool]$inst
-        if ($statusOK) {
+        $statusOK = [bool]$rep -or [bool]$inst
+        if ($rep) {
+            $ok = [int]$rep.Installed; $fail = [int]$rep.Failed; $pending = [int]$rep.Pending; $na = [int]$rep.NotApplicable
+            $denom = $ok + $fail
+            $failPct = if ($denom -gt 0) { [math]::Round(($fail / $denom) * 100, 1) } else { $null }
+        }
+        elseif ($inst) {
             $ok      = [int]($inst.installedDeviceCount)      + [int]($inst.installedUserCount)
             $fail    = [int]($inst.failedDeviceCount)         + [int]($inst.failedUserCount)
             $pending = [int]($inst.pendingInstallDeviceCount) + [int]($inst.pendingInstallUserCount)
@@ -406,7 +474,7 @@ function Get-IAApplications {
         }
         else {
             $ok = $null; $fail = $null; $pending = $null; $na = $null; $failPct = $null
-            if (-not $SkipInstallStatus) { Write-IALog "Status de instalação indisponível para o app '$($a.displayName)' (installSummary recusado pelo Graph)." -Level WARN }
+            if (-not $SkipInstallStatus) { Write-IALog "Status de instalacao indisponivel para o app '$($a.displayName)'." -Level WARN }
         }
 
         [PSCustomObject]@{

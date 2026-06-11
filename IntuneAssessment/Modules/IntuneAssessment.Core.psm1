@@ -326,6 +326,7 @@ function Invoke-IAGraphRequest {
         [Parameter(Mandatory)][string]$Uri,
         [string]$Method = 'GET',
         [hashtable]$Headers,        # ex.: @{ ConsistencyLevel = 'eventual' } para endpoints $count
+        [object]$Body,              # corpo para POST (ex.: API de relatórios do Intune)
         [int]$MaxRetries = 5,
         [switch]$SuppressNotFound   # alguns endpoints retornam 404 quando o recurso não está configurado
     )
@@ -338,6 +339,10 @@ function Invoke-IAGraphRequest {
             # ConvertFrom-IAJson, contornando o bug de conversão do SDK (ver acima).
             $p = @{ Method = $Method; Uri = $Uri; OutputType = 'Json'; ErrorAction = 'Stop' }
             if ($Headers) { $p.Headers = $Headers }
+            if ($null -ne $Body) {
+                $p.Body = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 8 -Compress }
+                $p.ContentType = 'application/json'
+            }
             $raw = Invoke-MgGraphRequest @p
             if ($raw -is [string]) { return (ConvertFrom-IAJson $raw) }
             return $raw   # alguns retornos (204/sem corpo) podem não ser string
