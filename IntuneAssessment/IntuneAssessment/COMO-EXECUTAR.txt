@@ -1,0 +1,32 @@
+=====================================================================
+ INTUNE ADVANCED ASSESSMENT - COMO EXECUTAR (LEIA ANTES)
+=====================================================================
+
+ 1. SEMPRE inicie por:   Run-IntuneAssessment.cmd
+    (duplo clique, ou ".\Run-IntuneAssessment.cmd" no PowerShell)
+
+    Parametros sao repassados normalmente, ex.:
+       Run-IntuneAssessment.cmd -AuthMethod DeviceCode
+
+ POR QUE:
+    Arquivos baixados da internet recebem a marca "Mark of the Web".
+    Com a politica RemoteSigned/AllSigned, o Windows bloqueia o
+    Invoke-IntuneAssessment.ps1 ANTES de executar, com a mensagem
+    "is not digitally signed". Nenhum script .ps1 consegue se
+    autodesbloquear - o bloqueio acontece antes da primeira linha.
+
+    O Run-IntuneAssessment.cmd nao esta sujeito a essa politica:
+    ele remove a marca de TODOS os arquivos e executa o assessment
+    com Bypass restrito ao processo (sem admin, sem alterar a maquina).
+
+ OBS:
+    - Apos a primeira execucao pelo .cmd, o desbloqueio e permanente
+      naquela maquina: ".\Invoke-IntuneAssessment.ps1" direto passa
+      a funcionar tambem.
+    - Se o SmartScreen exibir "Windows protegeu o computador" ao abrir
+      o .cmd baixado: "Mais informacoes" > "Executar assim mesmo".
+    - Alternativa manual sem o .cmd:
+        powershell -ExecutionPolicy Bypass -File .\Invoke-IntuneAssessment.ps1
+    - Unico cenario em que nada disso basta: politica forcada por GPO
+      (ver Docs\TROUBLESHOOTING.md, secao execution policy).
+=====================================================================
